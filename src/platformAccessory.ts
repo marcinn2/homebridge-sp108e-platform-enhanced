@@ -1,6 +1,7 @@
 import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import colorConvert from 'color-convert';
-import { ANIMATION_MODE_STATIC, ALL_ANIMATION_MODES } from './lib/animationModes';
+import { ANIMATION_MODE_STATIC, ALL_ANIMATION_MODES, PRESET_EFFECTS, PRESET_EFFECT_RAINBOW } from './lib/animationModes';
+import { ANIMATION_MODES, UNKNOWN_MODE, ANIMATION_MODE_WAVE } from './lib/animationModes';
 import sp108e, { sp108eStatus } from './lib/sp108e';
 import { Sp108ePlatform } from './platform';
 import { MANUFACTURER, MODEL } from './settings';
@@ -8,7 +9,6 @@ import { CHIP_TYPES, RGBW_CHIP_TYPES } from './lib/chipTypes';
 import { COLOR_ORDERS } from './lib/colorOrders';
 
 const POLL_INTERVAL = 1000;
-const DREAM_MODE_NUMBER = 1;
 
 /**
  * Platform Accessory
@@ -21,18 +21,21 @@ export class Sp108ePlatformAccessory {
   private debug: boolean;
 
   private rgbOn: boolean;
-  private dreamModeAnimationNumber: number;
+  private presetEffectNumber: number;
+  private animationNumber: number;
   private device: sp108e;
   private rgbService: Service;
   private wService!: Service;
   private asService: Service;
   private mdService: Service;
+  private prService!: Service;
+  private animationOn!: boolean;
 
   private lastPull!: Date;
   private deviceStatus!: sp108eStatus;
   private targetHue!: number | undefined;
   private targetSaturation!: number | undefined;
-  private animationOn!: boolean;
+  private presetOn!: boolean;
 
   constructor(
     platform: Sp108ePlatform,
@@ -42,9 +45,44 @@ export class Sp108ePlatformAccessory {
 
     this.debug = accessory.context.device.debug;
     this.isDebuggEnabled = this.debug;
+    this.debug ? this.platform.log.warn('Debug is enabled'): this.platform.log.info('Debug is disabled');
 
     this.rgbOn = false;
-    this.dreamModeAnimationNumber = accessory.context.device.dreamModeAnimationNumber;
+    this.presetEffectNumber = accessory.context.device.defaultDreamModeNumber;
+    this.animationNumber = accessory.context.device.defaultAnimationNumber;
+
+    // Setting defaultAnimationNumber to STATIC (211) cause problem when switching on animations. It will switch off immediately
+    if (this.animationNumber === ANIMATION_MODE_STATIC) {
+      this.animationNumber = ANIMATION_MODE_WAVE;
+    }
+
+    // Available presets from config (comma-separated string).
+    // Convert comma-separated string to array of numbers, ignoring spaces.
+    let AVAILABLE_EFECTS: number[] | undefined;
+    const availableEffectsConfig = this.accessory.context.config?.availableEffects;
+    if (typeof availableEffectsConfig === 'string') {
+      // Parse comma-separated string: "0, 1, 2, 5, 10" -> [0, 1, 2, 5, 10]
+      AVAILABLE_EFECTS = availableEffectsConfig
+        .split(',')
+        .map(token => {
+          const num = parseInt(token.trim(), 10);
+          return isNaN(num) ? null : num;
+        })
+        .filter((num): num is number => num !== null);
+    } else if (Array.isArray(availableEffectsConfig)) {
+      AVAILABLE_EFECTS = availableEffectsConfig;
+    }
+
+    // Helper: check whether a given presetMode is allowed by AVAILABLE_EFECTS.
+    // If AVAILABLE_EFECTS is not an array or is empty, treat all presets as allowed.
+    const isPresetAllowed = (presetMode: string): boolean => {
+      if (!Array.isArray(AVAILABLE_EFECTS) || AVAILABLE_EFECTS.length === 0) {
+        return true;
+      }
+      const idx = Math.floor(Number(presetMode));
+      return AVAILABLE_EFECTS.includes(idx);
+    };
+
 
     this.platform.log.info(accessory.context.device);
 
@@ -117,8 +155,10 @@ export class Sp108ePlatformAccessory {
       .getCharacteristic(this.platform.Characteristic.ActiveIdentifier)
       .onSet(this.setAnimationMode.bind(this));
 
-    const animationModes = Object.entries({ ...ALL_ANIMATION_MODES });
+    const animationModes = Object.entries({ ...ANIMATION_MODES });
     for (const [animationMode, animationModeName] of animationModes) {
+
+      //TODO remove this condition when animationModeOn is removed
       if (animationMode === ANIMATION_MODE_STATIC.toString()) {
         continue;
       }
@@ -135,12 +175,59 @@ export class Sp108ePlatformAccessory {
       this.mdService.addLinkedService(animationModeInputSource);
     }
 
+    // Duplicate mdService as prService (preset modes) with separate InputSource instances
+    const prServiceName = accessory.context.device.name + ' Preset Mode';
+    this.prService = this.accessory.getService(prServiceName) ||
+      this.accessory.addService(this.platform.Service.Television, prServiceName, `${serialNumberBase}/pr`);
+
+    this.prService
+      .getCharacteristic(this.platform.Characteristic.Active)
+      .onSet(this.setPresetModeOn.bind(this));
+
+    this.prService
+      .getCharacteristic(this.platform.Characteristic.ActiveIdentifier)
+      .onSet(this.setPresetMode.bind(this));
+    this.prService.setCharacteristic(this.platform.api.hap.Characteristic.Name, 'Preset Mode');
+
+
+    // Create separate InputSource services for prService using PRESET_EFFECTS
+    const presetModes = Object.entries({ ...PRESET_EFFECTS });
+    let createdPresetCount = 0;
+    for (const [presetMode, presetModeName] of presetModes) {
+
+      // If AVAILABLE_EFECTS is not provided, limit created InputSource services to the first 50 presets
+      if ((!Array.isArray(AVAILABLE_EFECTS) || AVAILABLE_EFECTS.length === 0) && createdPresetCount >= 50) {
+        break;
+      }
+
+      // const prInputServiceName = `${presetModeName} PR`;
+      // const prInputServiceSubtype = `${serialNumberBase}/pr/${presetMode}`;
+
+      if (!isPresetAllowed(presetMode as string)) {
+        this.platform.log.info('Preset not allowed by config ->', presetMode);
+        continue;
+      }
+
+      const presetModeInputSource = this.accessory.getService(presetModeName) ||
+        this.accessory.addService(this.platform.Service.InputSource, presetMode, presetModeName);
+
+      presetModeInputSource
+        .setCharacteristic(this.platform.api.hap.Characteristic.Identifier, parseInt(presetMode))
+        .setCharacteristic(this.platform.api.hap.Characteristic.ConfiguredName, presetModeName)
+        .setCharacteristic(this.platform.api.hap.Characteristic.IsConfigured, this.platform.api.hap.Characteristic.IsConfigured.CONFIGURED)
+        .setCharacteristic(this.platform.api.hap.Characteristic.InputSourceType, this.platform.api.hap.Characteristic.InputSourceType.HDMI);
+
+      this.prService.addLinkedService(presetModeInputSource);
+      createdPresetCount++;
+    }
+
     this.initialize(accessory.context.device);
     this.sync();
   }
 
   async initialize({ chip, colorOrder, segments, ledsPerSegment }) {
     this.animationOn = false;
+    this.presetOn = false;
 
     await this.pollStatus();
     if (typeof this.deviceStatus === 'undefined') {
@@ -184,23 +271,53 @@ export class Sp108ePlatformAccessory {
 
       this.rgbOn = this.deviceStatus.on;
 
-      const animationModeOn = this.deviceStatus.animationMode !== ANIMATION_MODE_STATIC && this.deviceStatus.on ?
+      const tmpAMode: number = this.deviceStatus.animationMode;
+
+      const animationModeOn = tmpAMode !== ANIMATION_MODE_STATIC && tmpAMode !== UNKNOWN_MODE && this.deviceStatus.on ?
         this.platform.api.hap.Characteristic.Active.ACTIVE :
         this.platform.api.hap.Characteristic.Active.INACTIVE;
 
-      let animationMode = this.deviceStatus.animationMode;
-      if (typeof ALL_ANIMATION_MODES[this.deviceStatus.animationMode] === 'undefined') {
-        this.debug && this.platform.log.info('Get Characteristic ActiveIdentifier of md ->', DREAM_MODE_NUMBER);
-        animationMode = DREAM_MODE_NUMBER;
+      if (tmpAMode !== ANIMATION_MODE_STATIC && tmpAMode !== UNKNOWN_MODE && this.deviceStatus.on) {
+        if (typeof ANIMATION_MODES[this.deviceStatus.animationMode] !== 'undefined') {
+          this.animationNumber = this.deviceStatus.animationMode;
+          this.debug && this.platform.log.info('Value of animationNumber is correct ->', this.animationNumber);
+        } else {
+          this.debug && this.platform.log.info('Value of animationNumber is not in ANIMATION_MODES');
+        }
+      } else {
+        this.debug &&
+        this.platform.log.info('State of animationNumber is unknown or device off ->', this.deviceStatus.on);
+      }
+
+      const presetModeOn = this.deviceStatus.presetEffectMode !== UNKNOWN_MODE && this.deviceStatus.on ?
+        this.platform.api.hap.Characteristic.Active.ACTIVE :
+        this.platform.api.hap.Characteristic.Active.INACTIVE;
+
+      if (this.deviceStatus.presetEffectMode !== UNKNOWN_MODE && this.deviceStatus.on) {
+        if (typeof PRESET_EFFECTS[this.deviceStatus.presetEffectMode] !== 'undefined') {
+          this.presetEffectNumber = this.deviceStatus.presetEffectMode;
+          this.debug && this.platform.log.info('Value of presetEffectMode ->', this.presetEffectNumber);
+        } else {
+          this.debug &&
+          this.platform.log.info('Value of presetEffectMode -> ', this.deviceStatus.presetEffectMode, ' not in PRESET_EFFECTS');
+        }
+      } else {
+        this.debug && this.platform.log.info('State of presetEffectMode is unknown or device off ->', this.deviceStatus.on);
       }
 
       // rgbService
       this.rgbService.updateCharacteristic(this.platform.Characteristic.On, this.rgbOn);
       this.debug && this.platform.log.info('Update Characteristic On ->', this.rgbOn);
 
-      this.rgbService.updateCharacteristic(this.platform.Characteristic.Brightness, this.deviceStatus.brightnessPercentage);
-      this.debug && this.platform.log.info('Update Characteristic Brightness ->', this.deviceStatus.brightnessPercentage);
-
+      if (this.rgbOn) {
+        // Fix: Homebridge expects a valid finite number for Brightness, fallback to 0 if NaN
+        let safeBrightness = this.deviceStatus.brightnessPercentage;
+        if (typeof safeBrightness !== 'number' || !isFinite(safeBrightness) || isNaN(safeBrightness)) {
+          safeBrightness = 0;
+        }
+        this.rgbService.updateCharacteristic(this.platform.Characteristic.Brightness, safeBrightness);
+        this.debug && this.platform.log.info('Update Characteristic Brightness ->', safeBrightness);
+      }
       this.rgbService.updateCharacteristic(this.platform.Characteristic.Hue, this.deviceStatus.hsv.hue);
       this.debug && this.platform.log.info('Update Characteristic Hue ->', this.deviceStatus.hsv.hue);
 
@@ -209,23 +326,54 @@ export class Sp108ePlatformAccessory {
 
       // wService
       if (this.wService) {
-        this.wService.updateCharacteristic(this.platform.Characteristic.Brightness, this.deviceStatus.whiteBrightnessPercentage);
-        this.debug && this.platform.log.info('Update Characteristic Brightness of w ->', this.deviceStatus.whiteBrightnessPercentage);
+        // Fix: Homebridge expects a valid finite number for Brightness, fallback to 0 if NaN
+        let safeWhiteBrightness = this.deviceStatus.whiteBrightnessPercentage;
+        if (typeof safeWhiteBrightness !== 'number' || !isFinite(safeWhiteBrightness) || isNaN(safeWhiteBrightness)) {
+          safeWhiteBrightness = 0;
+        }
+        this.wService.updateCharacteristic(this.platform.Characteristic.Brightness, safeWhiteBrightness);
+        this.debug && this.platform.log.info('Update Characteristic Brightness of w ->', safeWhiteBrightness);
       }
 
       // asService
       this.asService.updateCharacteristic(this.platform.Characteristic.Active, animationModeOn);
       this.debug && this.platform.log.info('Update Characteristic Active of as ->', animationModeOn);
 
-      this.asService.updateCharacteristic(this.platform.Characteristic.RotationSpeed, this.deviceStatus.animationSpeedPercentage);
-      this.debug && this.platform.log.info('Update Characteristic RotationSpeed of as ->', this.deviceStatus.animationSpeedPercentage);
+      // Fix: Homebridge expects a valid finite number for RotationSpeed, fallback to 0 if NaN
+      let safeRotationSpeed = this.deviceStatus.animationSpeedPercentage;
+      if (typeof safeRotationSpeed !== 'number' || !isFinite(safeRotationSpeed) || isNaN(safeRotationSpeed)) {
+        safeRotationSpeed = 0;
+      }
+      this.asService.updateCharacteristic(this.platform.Characteristic.RotationSpeed, safeRotationSpeed);
+      this.debug && this.platform.log.info('Update Characteristic RotationSpeed of as ->', safeRotationSpeed);
 
       // mdService
       this.mdService.updateCharacteristic(this.platform.Characteristic.Active, animationModeOn);
       this.debug && this.platform.log.info('Update Characteristic Active of md ->', animationModeOn);
 
-      this.mdService.updateCharacteristic(this.platform.Characteristic.ActiveIdentifier, animationMode);
-      this.debug && this.platform.log.info('Update Characteristic ActiveIdentifier of md ->', animationMode);
+      if (this.animationNumber !== UNKNOWN_MODE) {
+        let safeActiveIdentifier = this.animationNumber;
+        if (typeof safeActiveIdentifier !== 'number' || !isFinite(safeActiveIdentifier) || isNaN(safeActiveIdentifier)) {
+          safeActiveIdentifier = ANIMATION_MODE_STATIC;
+        }
+        this.mdService.updateCharacteristic(this.platform.Characteristic.ActiveIdentifier, safeActiveIdentifier);
+        this.debug && this.platform.log.info('Update Characteristic ActiveIdentifier of md ->', safeActiveIdentifier);
+      }
+
+      if (this.prService ) {
+        this.prService.updateCharacteristic(this.platform.Characteristic.Active, presetModeOn);
+        this.debug && this.platform.log.info('Update Characteristic Active of pr ->', presetModeOn);
+
+        // prService (preset) mirrors mdService state
+        if ( this.presetEffectNumber !== UNKNOWN_MODE) {
+          let safeIdentifier = this.presetEffectNumber;
+          if (typeof safeIdentifier !== 'number' || !isFinite(safeIdentifier) || isNaN(safeIdentifier)) {
+            safeIdentifier = PRESET_EFFECT_RAINBOW;
+          }
+          this.prService.updateCharacteristic(this.platform.Characteristic.ActiveIdentifier, safeIdentifier);
+          this.debug && this.platform.log.info('Update Characteristic ActiveIdentifier of pr ->', safeIdentifier);
+        }
+      }
     } catch (e) {
       this.platform.log.error('Pull error ->', e);
     }
@@ -352,11 +500,28 @@ export class Sp108ePlatformAccessory {
       }
 
       this.animationOn = Boolean(value);
+
+      let currentAnnimationMode = UNKNOWN_MODE;
+      if ( this.animationOn) {
+        currentAnnimationMode = this.deviceStatus.animationMode !== UNKNOWN_MODE
+          ? this.deviceStatus.animationMode : this.animationNumber;
+        // if (currentAnnimationMode === ANIMATION_MODE_STATIC) {
+        //   currentAnnimationMode = ANIMATION_MODE_FLOW;
+        // }
+        if (typeof ANIMATION_MODES[currentAnnimationMode] === 'undefined') {
+          currentAnnimationMode = ANIMATION_MODE_WAVE;
+        }
+        if (currentAnnimationMode !== ANIMATION_MODE_STATIC) {
+          this.animationNumber = currentAnnimationMode;
+          this.deviceStatus.animationMode - currentAnnimationMode;
+        }
+      }
+
       value
-        ? this.device.setDreamMode(this.dreamModeAnimationNumber)
+        ? this.device.setAnimationMode(this.animationNumber)
         : this.device.setAnimationMode(ANIMATION_MODE_STATIC);
 
-      this.debug && this.platform.log.info('Set Characteristic Active of as/md ->', value);
+      this.debug && this.platform.log.info('Set Characteristic Active of as/md/pr ->', value);
     } catch (e) {
       throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
     }
@@ -364,20 +529,91 @@ export class Sp108ePlatformAccessory {
 
   async setAnimationMode(value: CharacteristicValue) {
     try {
-      const truncValue = (value as number) % 180 as CharacteristicValue;
-      this.platform.log.info('Checking animation mode', value, truncValue.toString(), ALL_ANIMATION_MODES[truncValue.toString()]);
+      this.platform.log.info('Checking animation mode', value, value.toString(), ALL_ANIMATION_MODES[value.toString()]);
 
       if (!this.deviceStatus.on) {
         await this.device.on();
       }
 
-      if (typeof ALL_ANIMATION_MODES[truncValue.toString()] === 'undefined') {
-        await this.device.setDreamMode(this.dreamModeAnimationNumber);
+      if (typeof ANIMATION_MODES[value.toString()] === 'undefined') {
+        await this.device.setAnimationMode(ANIMATION_MODE_STATIC);
       } else {
-        await this.device.setAnimationMode(truncValue as number);
+        await this.device.setAnimationMode(value as number);
       }
 
-      this.debug && this.platform.log.info('Set Characteristic ActiveIdentifier of md ->', truncValue);
+      this.debug && this.platform.log.info('Set Characteristic ActiveIdentifier of md ->', value);
+    } catch (e) {
+      throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+  }
+
+  async setPresetModeOn(value: CharacteristicValue) {
+    try {
+      this.debug && this.platform.log.info(
+        'Checking whether Characteristic Active of pr should be changed',
+        value,
+        this.deviceStatus.presetEffectMode,
+        this.presetOn,
+      );
+
+      if (value && this.deviceStatus.presetEffectMode !== UNKNOWN_MODE && this.presetOn === true) {
+        this.debug && this.platform.log.info('Characteristic Active of pr is already ->', value);
+        return;
+      }
+      if (!value && this.deviceStatus.presetEffectMode === UNKNOWN_MODE && this.presetOn === false) {
+        this.debug && this.platform.log.info('Characteristic Active of pr is already ->', value);
+        return;
+      }
+
+      if (!this.deviceStatus.on) {
+        await this.device.on();
+      }
+
+      this.presetOn = Boolean(value);
+
+      if (this.presetOn) {
+        let currentPresetMode = UNKNOWN_MODE;
+        currentPresetMode = this.deviceStatus.presetEffectMode !== UNKNOWN_MODE
+          ? this.deviceStatus.presetEffectMode : this.presetEffectNumber;
+
+        // if (typeof PRESET_EFFECTS[currentPresetMode] !== 'undefined') {
+        //   currentPresetMode = PRESET_EFFECT_RAINBOW;
+        // }
+        this.presetEffectNumber = currentPresetMode;
+        this.deviceStatus.presetEffectMode = currentPresetMode;
+        this.debug && this.platform.log.info('Current preset mode ->', this.presetEffectNumber);
+      }
+
+      value
+        ? this.device.setPresetMode(this.presetEffectNumber)
+        : this.device.setAnimationMode(ANIMATION_MODE_STATIC);
+
+      this.debug && this.platform.log.info('Set Characteristic Active of pr ->', value);
+    } catch (e) {
+      throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+  }
+
+
+
+  async setPresetMode(value: CharacteristicValue) {
+    try {
+      const truncValue = (value as number) % 180 as CharacteristicValue;
+      this.platform.log.info('Checking preset mode', value, truncValue.toString(), PRESET_EFFECTS[truncValue.toString()]);
+
+      if (!this.deviceStatus.on) {
+        await this.device.on();
+      }
+
+      if (typeof PRESET_EFFECTS[truncValue.toString()] === 'undefined') {
+        // If preset not found, fallback to rainbow mode
+        await this.device.setPresetMode(PRESET_EFFECT_RAINBOW);
+      } else {
+        // Use device.setPresetMode to apply preset (does not call accessory-level setAnimationMode)
+        await this.device.setPresetMode(truncValue as number);
+      }
+
+      this.debug && this.platform.log.info('Set Characteristic ActiveIdentifier of pr ->', truncValue);
     } catch (e) {
       throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
     }

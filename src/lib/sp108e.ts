@@ -5,7 +5,7 @@
 import * as net from 'net';
 import colorConvert from 'color-convert';
 import { PromiseSocket } from 'promise-socket';
-import { ANIMATION_MODE_STATIC, ALL_ANIMATION_MODES } from './animationModes';
+import { ANIMATION_MODE_STATIC, UNKNOWN_MODE } from './animationModes';
 import { CHIP_TYPES } from './chipTypes';
 import { COLOR_ORDERS } from './colorOrders';
 import { Sp108ePlatformAccessory } from '../platformAccessory';
@@ -14,7 +14,6 @@ import { Sp108ePlatformAccessory } from '../platformAccessory';
 const WARM_WHITE = 'ff6717';
 const NATURAL_WHITE = '?';
 const COLD_WHITE = '?';
-
 const CMD_GET_NAME = '77';
 const CMD_SET_CHIP_TYPE = '1c';
 const CMD_SET_COLOR_ORDER = '3c';
@@ -31,6 +30,7 @@ const CMD_SET_SPEED = '03'; // Param: 00-FF
 const CMD_SET_COLOR = '22'; // RGB: 000000-FFFFFF
 const CMD_SET_DREAM_MODE = '2C'; // Param: 1-180
 const CMD_SET_DREAM_MODE_AUTO = '06'; // Param: 00
+const CMD_SET_CUSTOM = '02';
 
 const NO_PARAMETER = '000000';
 
@@ -50,6 +50,8 @@ export interface sp108eStatus {
   rawResponse: string;
   on: boolean;
   animationMode: number;
+  presetEffectMode: number;
+//  customEffectMode: number;
   animationSpeed: number;
   animationSpeedPercentage: number;
   brightness: number;
@@ -126,11 +128,14 @@ export default class sp108e {
    * Gets the status of the sp108e, on/off, color, etc
    */
   getStatus = async (): Promise<sp108eStatus> => {
+
     const response = await this.send(CMD_GET_STATUS, NO_PARAMETER, 17);
+    const anyMode = parseInt(response.substring(4, 6), 16);
     return {
       rawResponse: response,
       on: response.substring(2, 4) === '01',
-      animationMode: parseInt(response.substring(4, 6), 16),
+      animationMode: anyMode> 180 ? anyMode : UNKNOWN_MODE,
+      presetEffectMode: anyMode < 180 ? anyMode : UNKNOWN_MODE,
       animationSpeed: parseInt(response.substring(6, 8), 16),
       animationSpeedPercentage: parseInt(response.substring(6, 8), 16) / 255 * 100,
       brightness: parseInt(response.substring(8, 10), 16),
@@ -196,6 +201,16 @@ export default class sp108e {
   };
 
   /**
+   * Sets a preset mode (wrapper for animation command scoped to presets)
+   * @param {number} presetMode any integer 0-179
+   */
+  setPresetMode = async (presetMode: number) => {
+    const truncated = Math.min(Math.max(presetMode, 0), 179);
+    this.accessory.isDebuggEnabled && this.accessory.platform.log.info('set preset mode ->', truncated);
+    return await this.send(CMD_SET_DREAM_MODE, this.intToHex(truncated));
+  };
+
+  /**
    * Sets the speed of the animation
    * @param {integer} speed any integer 0-255
    */
@@ -207,23 +222,9 @@ export default class sp108e {
     return await this.setAnimationSpeed(Math.ceil(speedPercentage / 100 * 255));
   };
 
-  /**
-   * Sets the dreamcolor animation style (0 =auto, 1=rainbow) from 1-180
-   * @param {integer} speed any integer 1-180
-   */
-  setDreamMode = async (mode) => {
-    let truncated = Math.min(mode, 180);
-    truncated = Math.max(truncated, 1);
-    this.accessory.isDebuggEnabled && this.accessory.platform.log.info('set dream mode ->', mode);
-    return await this.send(CMD_SET_DREAM_MODE, this.intToHex(mode - 1), 0);
-  };
-
-  setDreamModeAuto = async () => {
-    return await this.send(CMD_SET_DREAM_MODE_AUTO);
-  };
-
-  intToHex = (int: number) => {
-    return int.toString(16).padStart(2, '0');
+  intToHex = (int: number | undefined) => {
+    const value = int ?? 0;
+    return value.toString(16).padStart(2, '0');
   };
 
   send = async (cmd: string, parameter = NO_PARAMETER, responseLength = 0): Promise<string> => {

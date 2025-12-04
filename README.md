@@ -1,4 +1,4 @@
-# homebridge-sp108e-platform-modified
+# homebridge-sp108e-platform-enhanced
 
 [![version](https://img.shields.io/npm/v/homebridge-sp108e-platform.svg)](https://www.npmjs.com/package/homebridge-sp108e-platform)
 [![downloads](https://img.shields.io/npm/dt/homebridge-sp108e-platform.svg)](https://www.npmjs.com/package/homebridge-sp108e-platform)
@@ -10,16 +10,28 @@ A homebridge plugin for integrating SP108E LED controllers into HomeKit.
 
 - color settings
 - animation mode selection
+- dream mode selection
 - animation speed adjustment
 - multiple-instance support
 - controller chip type / RGB channel order / segment amount / LEDs per segment settings in configuation
 - RGBW LED strip as two separate lights (RGB + W)
-- Dream Mode configuration
+- definition of favorite preset effects
+
+## Notes
+
+There are 180 preset effects defined in the LED Controller, but the TV Accessory accepts only 100 items. Please use availableEffects in the configuration to limit the number of items in the list. If availableEffects is not defined, only the first 50 effects will be added to the list.
+
+## Open issues
+
+## ToDo list
+
+- Implementation of custom effects
 
 ## Credits
 
 - [SP108E PHP library by Lehkeda](https://github.com/Lehkeda/SP108E_controller)
 - [SP108E JavaScript library by greenwombat](https://github.com/greenwombat/sp108e)
+- [SP108E WS2815 LED Controller Integration for Home Assistant](https://github.com/samhstein/sp108e_ws2815)
 
 ## Disclaimer
 

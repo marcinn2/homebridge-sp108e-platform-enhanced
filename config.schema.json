@@ -102,15 +102,30 @@
               "required": true,
               "minimum": 1
             },
-            "dreamModeAnimationNumber": {
-              "title": "Dream Mode Animation Number",
+            "defaultAnimationNumber": {
+              "title": "Default Animation Number",
               "type": "integer",
               "required": false,
-              "placeholder": "1-180, default - 1",
-              "default": 1,
+              "placeholder": "205-212, default - 211",
+              "default": 212,
               "description": "Animation number for dream mode",
-              "minimum": 1,
-              "maximum": 180
+              "minimum": 205,
+              "maximum": 212
+            },
+            "defaultDreamModeNumber": {
+              "title": "Default Dream Mode Number",
+              "type": "integer",
+              "required": false,
+              "placeholder": "0-179, default - 0, rainbow",
+              "default": 0,
+              "description": "Number for dream mode",
+              "minimum": 0,
+              "maximum": 179
+            },
+            "availableEffects": {
+              "title": "Available Effects",
+              "type": "string",
+              "description": "List of effect IDs to make them available in accessory (max 100) (empty = first 50 effects - 0..49)"
             },
             "debug": {
               "title": "Debug",
