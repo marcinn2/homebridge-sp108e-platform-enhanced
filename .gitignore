@@ -121,3 +121,4 @@ dist
 
 .DS_Store
 .github/copilot-instructions.md
+.vscode/sftp.json
