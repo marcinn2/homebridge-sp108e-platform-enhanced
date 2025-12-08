@@ -59,7 +59,7 @@ export class Sp108ePlatformAccessory {
     // Available presets from config (comma-separated string).
     // Convert comma-separated string to array of numbers, ignoring spaces.
     let AVAILABLE_EFECTS: number[] | undefined;
-    const availableEffectsConfig = this.accessory.context.config?.availableEffects;
+    const availableEffectsConfig = this.accessory.context.device.availableEffects;
     if (typeof availableEffectsConfig === 'string') {
       // Parse comma-separated string: "0, 1, 2, 5, 10" -> [0, 1, 2, 5, 10]
       AVAILABLE_EFECTS = availableEffectsConfig
@@ -428,8 +428,6 @@ export class Sp108ePlatformAccessory {
         }
         await this.device.setBrightnessPercentage(i as number);
       }
-
-      // COMMNT
 
       this.platform.log.info('Set Characteristic Brightness truncated to ->', i);
     } catch (e) {

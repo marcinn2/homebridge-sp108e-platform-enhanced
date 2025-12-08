@@ -73,6 +73,96 @@ export default class sp108e {
     this.accessory = accessory;
   }
 
+  // Persistent socket management
+  private _rawSocket?: net.Socket;
+  private _client?: PromiseSocket<net.Socket>;
+  private _connected = false;
+  private _sendQueue: Promise<any> = Promise.resolve();
+  private readonly SEND_MAX_RETRIES = 3;
+  private readonly SEND_BASE_DELAY_MS = 200;
+  private readonly SEND_TIMEOUT_MS = 5000;
+
+  private delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  private async ensureConnected(): Promise<void> {
+    if (this._connected && this._client) {
+      return;
+    }
+
+    // Clean up any previous socket
+    try {
+      this._rawSocket?.destroy();
+    } catch (_) { /* ignore */ }
+    this._rawSocket = new net.Socket();
+    this._rawSocket.setKeepAlive(true);
+    // Attach temporary error/close handlers for this socket instance
+    this._rawSocket.on('error', (err) => {
+      this.accessory.isDebuggEnabled && this.accessory.platform.log.debug('Socket error ->', err);
+      this._connected = false;
+      try {
+        this._rawSocket?.destroy();
+      } catch (_) { /* ignore */ }
+      this._client = undefined;
+    });
+
+    this._rawSocket.on('close', () => {
+      this.accessory.isDebuggEnabled && this.accessory.platform.log.debug('Socket closed');
+      this._connected = false;
+      this._client = undefined;
+    });
+
+    // Connect with a timeout so we don't hang indefinitely
+    const connectPromise = new Promise<void>((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined = undefined;
+      const onConnect = () => {
+        cleanup();
+        if (timer) {
+          clearTimeout(timer);
+        }
+        resolve();
+      };
+      const onError = (err: any) => {
+        cleanup();
+        if (timer) {
+          clearTimeout(timer);
+        }
+        reject(err);
+      };
+      const onTimeout = () => {
+        cleanup();
+        try {
+          this._rawSocket?.destroy();
+        } catch (_) { /* ignore */ }
+        reject(new Error('connect timeout'));
+      };
+
+      const cleanup = () => {
+        this._rawSocket?.removeListener('connect', onConnect);
+        this._rawSocket?.removeListener('error', onError);
+      };
+
+      this._rawSocket?.once('connect', onConnect);
+      this._rawSocket?.once('error', onError);
+      this._rawSocket?.connect(this.options.port, this.options.host);
+
+      // enforce connect timeout
+      timer = setTimeout(onTimeout, this.SEND_TIMEOUT_MS);
+    });
+
+    await connectPromise;
+    const client = new PromiseSocket(this._rawSocket);
+    this._client = client;
+    this._connected = true;
+  }
+
+  private _forceDisconnect() {
+    try {
+      this._rawSocket?.destroy();
+    } catch (_) { /* ignore */ }
+    this._client = undefined;
+    this._connected = false;
+  }
+
   setChipType = async (chipType: string) => {
     const index = CHIP_TYPES.indexOf(chipType);
     if (index === -1) {
@@ -228,25 +318,76 @@ export default class sp108e {
   };
 
   send = async (cmd: string, parameter = NO_PARAMETER, responseLength = 0): Promise<string> => {
-    const client = new PromiseSocket(new net.Socket());
-    await client.connect(this.options.port, this.options.host);
-    const hex = CMD_PREFIX + parameter.padEnd(6, '0') + cmd + CMD_SUFFIX;
-    const rawHex = Buffer.from(hex, 'hex');
-    await client.write(rawHex);
+    const attemptExecute = async (): Promise<string> => {
+      // Ensure persistent connection is established
+      await this.ensureConnected();
+      if (!this._client) {
+        throw new Error('Unable to establish connection');
+      }
 
-    let response;
-    if (responseLength > 0) {
-      response = await client.read(responseLength);
-    }
+      const hex = CMD_PREFIX + parameter.padEnd(6, '0') + cmd + CMD_SUFFIX;
+      const rawHex = Buffer.from(hex, 'hex');
 
-    await client.end();
+      try {
+        await this._client.write(rawHex);
 
-    if (responseLength === 0) {
-      // Just a little hacky sleep to stop the sp108e getting overwhelmed by sequential writes
-      await this.sleep();
-    }
+        if (responseLength > 0) {
+          // read with per-operation timeout
+          const readPromise = this._client.read(responseLength);
+          let t: NodeJS.Timeout | undefined;
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            t = setTimeout(() => {
+              // Force reconnect on timeout
+              this._forceDisconnect();
+              reject(new Error('send() read timeout'));
+            }, this.SEND_TIMEOUT_MS);
+          });
+          const responseBuf = await Promise.race([readPromise, timeoutPromise]) as Buffer | undefined;
+          if (t) {
+            clearTimeout(t);
+          }
+          return responseBuf ? responseBuf.toString('hex') : '';
+        }
 
-    return response ? response.toString('hex') : '';
+        // write-only command: small delay to avoid overwhelming device
+        await this.sleep();
+        return '';
+      } catch (err) {
+        // On any error, force disconnect so next attempt reconnects
+        this._forceDisconnect();
+        throw err;
+      }
+    };
+
+    const executeWithRetries = async (): Promise<string> => {
+      let lastErr: any = null;
+      for (let attempt = 0; attempt <= this.SEND_MAX_RETRIES; attempt++) {
+        try {
+          return await attemptExecute();
+        } catch (err) {
+          lastErr = err;
+          // Transient/network errors -> retry with exponential backoff
+          if (attempt < this.SEND_MAX_RETRIES) {
+            const backoff = this.SEND_BASE_DELAY_MS * Math.pow(2, attempt);
+            this.accessory.isDebuggEnabled && this.accessory.platform.log.info('send() failed, retrying after backoff ms ->', backoff, err);
+            await this.delay(backoff);
+            continue;
+          }
+          // Exhausted retries
+          throw lastErr;
+        }
+      }
+      // Should not reach here
+      throw lastErr;
+    };
+
+    // Queue execution to ensure only one send() runs at a time
+    const queued = this._sendQueue.then(() => executeWithRetries());
+    // Keep the queue chain alive even if a request fails
+    this._sendQueue = queued.catch((err) => {
+      this.accessory.isDebuggEnabled && this.accessory.platform.log.debug('send() queue error ->', err);
+    });
+    return queued;
   };
 
   sleep = () => {
