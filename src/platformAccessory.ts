@@ -318,6 +318,7 @@ export class Sp108ePlatformAccessory {
         this.rgbService.updateCharacteristic(this.platform.Characteristic.Brightness, safeBrightness);
         this.debug && this.platform.log.info('Update Characteristic Brightness ->', safeBrightness);
       }
+
       this.rgbService.updateCharacteristic(this.platform.Characteristic.Hue, this.deviceStatus.hsv.hue);
       this.debug && this.platform.log.info('Update Characteristic Hue ->', this.deviceStatus.hsv.hue);
 
@@ -412,9 +413,25 @@ export class Sp108ePlatformAccessory {
         await this.device.on();
       }
 
-      await this.device.setBrightnessPercentage(value as number);
 
-      this.platform.log.info('Set Characteristic Brightness ->', value);
+      // From a generic value (CharacteristicValue) to integer with validation:
+      const n = Number(value);
+      let i = 0;
+      if (!Number.isFinite(n) || Number.isNaN(n)) {
+        await this.device.off();
+      } else {
+        i = Math.trunc(n);
+        if ( i <1 ) {
+          i = 0;
+          await this.device.off();
+          return;
+        }
+        await this.device.setBrightnessPercentage(i as number);
+      }
+
+      // COMMNT
+
+      this.platform.log.info('Set Characteristic Brightness truncated to ->', i);
     } catch (e) {
       throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
     }
