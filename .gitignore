@@ -128,4 +128,10 @@ dist
 .sync.ffs_db
 .vscode/scp.json
 
+
+
+.idea/
+.sync.ffs_db
+.vscode/scp.json
+
 .claude
