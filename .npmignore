@@ -128,8 +128,17 @@ dist
 .vscode-test
 
 # yarn v2
-
 .yarn/cache
 .yarn/unplugged
 .yarn/build-state.yml
 .pnp.*
+
+.DS_Store
+.github/copilot-instructions.md
+.vscode/sftp.json
+
+.vscode/
+.idea/
+.sync.ffs_db
+.vscode/scp.json
+

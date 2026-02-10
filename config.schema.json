@@ -127,6 +127,15 @@
               "type": "string",
               "description": "List of effect IDs to make them available in accessory (max 100) (empty = first 50 effects - 0..49)"
             },
+            "pollInterval": {
+              "title": "Poll Interval (ms)",
+              "type": "integer",
+              "required": false,
+              "default": 1000,
+              "description": "Polling interval in milliseconds used to poll device status. Accepts integer. Optional; default is 1000 ms.",
+              "minimum": 500,
+              "maximum": 10000
+            },
             "debug": {
               "title": "Debug",
               "type": "boolean",
