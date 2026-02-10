@@ -122,16 +122,7 @@ dist
 .DS_Store
 .github/copilot-instructions.md
 .vscode/sftp.json
-
-
 .idea/
 .sync.ffs_db
 .vscode/scp.json
-
-
-
-.idea/
-.sync.ffs_db
-.vscode/scp.json
-
 .claude
