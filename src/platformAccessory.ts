@@ -94,10 +94,12 @@ export class Sp108ePlatformAccessory {
     // set accessory information
     this.accessory.getService(this.platform.Service.AccessoryInformation)!
       .setCharacteristic(this.platform.Characteristic.Name, accessory.context.device.name)
+      .setCharacteristic(this.platform.Characteristic.ConfiguredName, accessory.context.device.name)
       .setCharacteristic(this.platform.Characteristic.Manufacturer, MANUFACTURER)
       .setCharacteristic(this.platform.Characteristic.Model, MODEL)
       .setCharacteristic(this.platform.Characteristic.SerialNumber, serialNumberBase);
     this.accessory.category = this.platform.api.hap.Categories.LIGHTBULB;
+
 
     // rgb led
     const rgbServiceName = accessory.context.device.name + ' Color';
@@ -135,17 +137,38 @@ export class Sp108ePlatformAccessory {
       this.accessory.addService(this.platform.Service.Fanv2, asServicename, `${serialNumberBase}/as`);
 
     this.asService
+      .setCharacteristic(this.platform.Characteristic.ConfiguredName, asServicename)
+      .setCharacteristic(this.platform.Characteristic.SleepDiscoveryMode,
+        this.platform.Characteristic.SleepDiscoveryMode.ALWAYS_DISCOVERABLE);
+
+
+    this.asService
       .getCharacteristic(this.platform.Characteristic.Active)
-      .onSet(this.setAnimationModeOn.bind(this));
+      .onSet(this.setAnimationSpeedOn.bind(this));
 
     this.asService
       .getCharacteristic(this.platform.Characteristic.RotationSpeed)
       .onSet(this.setAnimationSpeed.bind(this));
 
+
+    // Remove old input services that might have wrong subtypes
+    const existingInputs = this.accessory.services.filter(
+      service => service.UUID === this.platform.Service.InputSource.UUID,
+    );
+    existingInputs.forEach(service => {
+      this.accessory.removeService(service);
+    });
+
     // adnimation mode
     const mdServiceName = accessory.context.device.name + ' Animation Mode';
     this.mdService = this.accessory.getService(mdServiceName) ||
       this.accessory.addService(this.platform.Service.Television, mdServiceName, `${serialNumberBase}/md`);
+
+    // Configure TV service
+    this.mdService
+      .setCharacteristic(this.platform.Characteristic.ConfiguredName, mdServiceName)
+      .setCharacteristic(this.platform.Characteristic.SleepDiscoveryMode,
+        this.platform.Characteristic.SleepDiscoveryMode.ALWAYS_DISCOVERABLE);
 
     this.mdService
       .getCharacteristic(this.platform.Characteristic.Active)
@@ -163,8 +186,11 @@ export class Sp108ePlatformAccessory {
         continue;
       }
 
-      const animationModeInputSource = this.accessory.getService(animationModeName) ||
-        this.accessory.addService(this.platform.Service.InputSource, animationMode, animationModeName);
+      const mdInputServiceName = `${animationModeName} MD`;
+      const mdInputServiceSubtype = `${serialNumberBase}/md/${animationMode}`;
+
+      const animationModeInputSource = this.accessory.getService(mdInputServiceName) ||
+        this.accessory.addService(this.platform.Service.InputSource, mdInputServiceName, mdInputServiceSubtype);
 
       animationModeInputSource
         .setCharacteristic(this.platform.api.hap.Characteristic.Identifier, parseInt(animationMode))
@@ -179,6 +205,12 @@ export class Sp108ePlatformAccessory {
     const prServiceName = accessory.context.device.name + ' Preset Mode';
     this.prService = this.accessory.getService(prServiceName) ||
       this.accessory.addService(this.platform.Service.Television, prServiceName, `${serialNumberBase}/pr`);
+
+    // Configure TV service
+    this.prService
+      .setCharacteristic(this.platform.Characteristic.ConfiguredName, prServiceName)
+      .setCharacteristic(this.platform.Characteristic.SleepDiscoveryMode,
+        this.platform.Characteristic.SleepDiscoveryMode.ALWAYS_DISCOVERABLE);
 
     this.prService
       .getCharacteristic(this.platform.Characteristic.Active)
@@ -200,16 +232,16 @@ export class Sp108ePlatformAccessory {
         break;
       }
 
-      // const prInputServiceName = `${presetModeName} PR`;
-      // const prInputServiceSubtype = `${serialNumberBase}/pr/${presetMode}`;
+      const prInputServiceName = `${presetModeName} PR`;
+      const prInputServiceSubtype = `${serialNumberBase}/pr/${presetMode}`;
 
       if (!isPresetAllowed(presetMode as string)) {
         this.platform.log.info('Preset not allowed by config ->', presetMode);
         continue;
       }
 
-      const presetModeInputSource = this.accessory.getService(presetModeName) ||
-        this.accessory.addService(this.platform.Service.InputSource, presetMode, presetModeName);
+      const presetModeInputSource = this.accessory.getService(prInputServiceName) ||
+        this.accessory.addService(this.platform.Service.InputSource, prInputServiceName, prInputServiceSubtype);
 
       presetModeInputSource
         .setCharacteristic(this.platform.api.hap.Characteristic.Identifier, parseInt(presetMode))
@@ -317,6 +349,9 @@ export class Sp108ePlatformAccessory {
         }
         this.rgbService.updateCharacteristic(this.platform.Characteristic.Brightness, safeBrightness);
         this.debug && this.platform.log.info('Update Characteristic Brightness ->', safeBrightness);
+      } else {
+        this.rgbService.updateCharacteristic(this.platform.Characteristic.Brightness, 0);
+        this.debug && this.platform.log.info('Update Characteristic Brightness ->', 0);
       }
 
       this.rgbService.updateCharacteristic(this.platform.Characteristic.Hue, this.deviceStatus.hsv.hue);
@@ -402,6 +437,10 @@ export class Sp108ePlatformAccessory {
       }
       // Sync local rgb status
       this.rgbOn = Boolean(value);
+      if (!this.rgbOn) {
+        this.animationOn = false;
+        this.presetOn = false;
+      }
     } catch (e) {
       throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
     }
@@ -478,6 +517,20 @@ export class Sp108ePlatformAccessory {
       await this.device.setWhiteBrightnessPercentage(value as number);
 
       this.debug && this.platform.log.info('Set Characteristic Brightness of w ->', value);
+    } catch (e) {
+      throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+  }
+
+  async setAnimationSpeedOn(value: CharacteristicValue) {
+    try {
+      if (this.deviceStatus.animationMode !== UNKNOWN_MODE && this.deviceStatus.animationMode !== ANIMATION_MODE_STATIC) {
+        await this.setAnimationModeOn(value);
+      } else if (this.deviceStatus.presetEffectMode !== UNKNOWN_MODE) {
+        await this.setPresetModeOn(value);
+      } else {
+        await this.setAnimationModeOn(value);
+      }
     } catch (e) {
       throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
     }
